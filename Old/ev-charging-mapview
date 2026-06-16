@@ -1,0 +1,237 @@
+import React, { useState, useCallback } from 'react';
+import { MapPin, Zap, Star, Navigation, DollarSign, Info } from 'lucide-react';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+const EVChargingFinder = () => {
+
+  const [userLocation, setUserLocation] = useState(null);
+  const [stations, setStations] = useState([]);
+  const [topStations, setTopStations] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
+
+  // ============================================================
+  // GET USER LOCATION
+  // ============================================================
+
+  const getUserLocation = useCallback(() => {
+    setLoading(true);
+    setError(null);
+
+    if (!navigator.geolocation) {
+      setError("Geolocation not supported");
+      setLoading(false);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const location = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        };
+
+        setUserLocation(location);
+        initializeMap(location);
+        findNearbyStations(location);
+      },
+      (error) => {
+        setError(error.message);
+        setLoading(false);
+      }
+    );
+  }, []);
+
+  // ============================================================
+  // INITIALIZE LEAFLET MAP
+  // ============================================================
+
+  const initializeMap = (center) => {
+    const mapContainer = document.getElementById("map");
+    if (!mapContainer) return;
+
+    if (mapInstance) {
+      mapInstance.remove();
+    }
+
+    const map = L.map("map").setView([center.lat, center.lng], 13);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors"
+    }).addTo(map);
+
+    L.marker([center.lat, center.lng])
+      .addTo(map)
+      .bindPopup("Your Location")
+      .openPopup();
+
+    setMapInstance(map);
+  };
+
+  // ============================================================
+  // FETCH EV STATIONS FROM OSM (Overpass API)
+  // ============================================================
+
+  const findNearbyStations = async (location) => {
+    try {
+      const query = `
+        [out:json];
+        (
+          node["amenity"="charging_station"](around:5000,${location.lat},${location.lng});
+        );
+        out body;
+      `;
+
+      const response = await fetch(
+        "https://overpass-api.de/api/interpreter",
+        {
+          method: "POST",
+          body: query
+        }
+      );
+
+      const data = await response.json();
+
+      const enriched = data.elements.map((station) => {
+
+        const distance = calculateDistance(
+          location.lat,
+          location.lng,
+          station.lat,
+          station.lon
+        );
+
+        return {
+          id: station.id,
+          name: station.tags?.name || "EV Charging Station",
+          address: station.tags?.["addr:street"] || "Address not available",
+          location: {
+            lat: station.lat,
+            lng: station.lon
+          },
+          distance,
+          rating: (Math.random() * 5).toFixed(1), // Mock rating
+          totalRatings: Math.floor(Math.random() * 200),
+          chargingTypes: ["Level 2"],
+          pricing: { amount: 20, unit: "₹/kWh" }
+        };
+      });
+
+      setStations(enriched);
+      rankStations(enriched);
+      addMarkersToMap(enriched);
+      setLoading(false);
+
+    } catch (err) {
+      setError("Failed to fetch stations from OpenStreetMap");
+      setLoading(false);
+    }
+  };
+
+  // ============================================================
+  // ADD MARKERS
+  // ============================================================
+
+  const addMarkersToMap = (stationsList) => {
+    if (!mapInstance) return;
+
+    stationsList.forEach((station) => {
+      L.marker([station.location.lat, station.location.lng])
+        .addTo(mapInstance)
+        .bindPopup(`
+          <b>${station.name}</b><br/>
+          ${station.distance.toFixed(1)} km<br/>
+          ${station.pricing.amount}${station.pricing.unit}
+        `);
+    });
+  };
+
+  // ============================================================
+  // DISTANCE CALCULATION (HAVERSINE)
+  // ============================================================
+
+  const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) *
+      Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  };
+
+  // ============================================================
+  // RANKING
+  // ============================================================
+
+  const rankStations = (stationsList) => {
+    const scored = stationsList.map((station) => {
+      const score =
+        (10 - station.distance) * 0.5 +
+        station.rating * 0.5;
+
+      return {
+        ...station,
+        score: score.toFixed(1)
+      };
+    });
+
+    const ranked = scored.sort((a, b) => b.score - a.score);
+    setTopStations(ranked.slice(0, 3));
+  };
+
+  // ============================================================
+  // UI
+  // ============================================================
+
+  return (
+    <div style={{ padding: 20 }}>
+
+      <h1>EV Charging Station Finder (OpenStreetMap)</h1>
+
+      {!userLocation && (
+        <button onClick={getUserLocation} disabled={loading}>
+          {loading ? "Loading..." : "Find Charging Stations"}
+        </button>
+      )}
+
+      {error && <p style={{ color: "red" }}>{error}</p>}
+
+      {userLocation && (
+        <div id="map" style={{ height: "400px", marginTop: "20px" }} />
+      )}
+
+      {topStations.length > 0 && (
+        <div style={{ marginTop: "30px" }}>
+          <h2>Top 3 Recommended Stations</h2>
+
+          {topStations.map((station, index) => (
+            <div key={station.id} style={{
+              border: "1px solid #ccc",
+              padding: "10px",
+              marginBottom: "10px",
+              borderRadius: "8px"
+            }}>
+              <h3>{index + 1}. {station.name}</h3>
+              <p><MapPin size={14}/> {station.address}</p>
+              <p><Navigation size={14}/> {station.distance.toFixed(1)} km</p>
+              <p><Star size={14}/> {station.rating}/5</p>
+              <p><DollarSign size={14}/> {station.pricing.amount}{station.pricing.unit}</p>
+              <p>Total Score: {station.score}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default EVChargingFinder;
